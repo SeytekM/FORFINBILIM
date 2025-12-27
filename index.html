@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EasyFin - Личный бюджет</title>
+    <!-- Подключение библиотек через CDN для работы без сборки -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #020617; 
+            color: #e2e8f0; 
+            -webkit-user-select: none; 
+            user-select: none; 
+            -webkit-tap-highlight-color: transparent; 
+            overscroll-behavior-y: contain;
+        }
+        .slider-input::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 40px;
+            width: 40px;
+            border-radius: 16px;
+            background: #ffffff;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        .slider-input:active::-webkit-slider-thumb { transform: scale(1.1) rotate(5deg); }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 10px; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        // Импорт иконок из Lucide через ESM напрямую
+        import { 
+            Settings, History, Trash2, Check, 
+            RefreshCcw, Plus, Sparkles, 
+            Loader2, Target, Cloud, X 
+        } from 'https://esm.sh/lucide-react@0.263.1';
+
+        // Firebase SDK через модули
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, collection, onSnapshot, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        // --- КОНФИГУРАЦИЯ FIREBASE ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCnRSjQurFPebWd0ghhhMFMYyt7BIlkb8Y",
+            authDomain: "easyfin-ab369.firebaseapp.com",
+            projectId: "easyfin-ab369",
+            storageBucket: "easyfin-ab369.firebasestorage.app",
+            messagingSenderId: "228815071090",
+            appId: "1:228815071090:web:429357417e5becd67f1feb"
+        };
+
+        // Инициализация сервисов
+        const actualConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : firebaseConfig;
+        const app = initializeApp(actualConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : "easyfin-app";
+
+        const { useState, useEffect, useMemo } = React;
+
+        function App() {
+            const [view, setView] = useState('home');
+            const [user, setUser] = useState(null);
+            const [amount, setAmount] = useState(0);
+            const [maxLimit, setMaxLimit] = useState(10000);
+            const [expenses, setExpenses] = useState([]);
+            const [isSyncing, setIsSyncing] = useState(true);
+            const [showSuccess, setShowSuccess] = useState(false);
+            
+            const categories = [
+                { id: 1, name: 'Еда', color: 'bg-emerald-500' },
+                { id: 2, name: 'Транспорт', color: 'bg-blue-500' },
+                { id: 3, name: 'Дом', color: 'bg-orange-500' },
+                { id: 4, name: 'Развлечения', color: 'bg-purple-500' },
+                { id: 5, name: 'Шоппинг', color: 'bg-pink-500' },
+                { id: 6, name: 'Другое', color: 'bg-slate-500' },
+            ];
+
+            // Авторизация
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (e) { 
+                        console.error("Ошибка авторизации:", e); 
+                    }
+                };
+                initAuth();
+                const unsubscribe = onAuthStateChanged(auth, (u) => {
+                    setUser(u);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // Синхронизация данных с Firestore
+            useEffect(() => {
+                if (!user) return;
+                setIsSyncing(true);
+
+                // Слушатель трат (RULE 1: Специфический путь)
+                const expensesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'expenses');
+                const unsubExp = onSnapshot(expensesRef, (snap) => {
+                    setExpenses(snap.docs.map(d => ({ ...d.data(), id: d.id })).sort((a,b) => new Date(b.date) - new Date(a.date)));
+                    setIsSyncing(false);
+                }, (error) => {
+                    console.error("Ошибка загрузки трат:", error);
+                    setIsSyncing(false);
+                });
+
+                // Слушатель настроек
+                const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
+                const unsubSet = onSnapshot(settingsRef, (snap) => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        if (data.maxLimit) setMaxLimit(data.maxLimit);
+                    }
+                }, (error) => console.error("Ошибка загрузки настроек:", error));
+
+                return () => { unsubExp(); unsubSet(); };
+            }, [user]);
+
+            const handleAdd = async (catId) => {
+                if (!user || amount === 0) return;
+                try {
+                    const expensesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'expenses');
+                    await addDoc(expensesRef, {
+                        amount, 
+                        categoryId: catId, 
+                        date: new Date().toISOString()
+                    });
+                    setAmount(0);
+                    setShowSuccess(true);
+                    setTimeout(() => setShowSuccess(false), 1500);
+                } catch (e) {
+                    console.error("Ошибка при сохранении:", e);
+                }
+            };
+
+            const getTodayTotal = useMemo(() => {
+                const today = new Date().toDateString();
+                return expenses
+                    .filter(e => new Date(e.date).toDateString() === today)
+                    .reduce((sum, e) => sum + e.amount, 0);
+            }, [expenses]);
+
+            const deleteExpense = async (id) => {
+                if (!user) return;
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'expenses', id));
+                } catch (e) {
+                    console.error("Ошибка при удалении:", e);
+                }
+            };
+
+            const updateMaxLimit = async (val) => {
+                const limit = Math.max(100, Number(val));
+                setMaxLimit(limit);
+                if (user) {
+                    try {
+                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config'), { maxLimit: limit }, { merge: true });
+                    } catch (e) {
+                        console.error("Ошибка при обновлении лимита:", e);
+                    }
+                }
+            };
+
+            const HomeScreen = () => (
+                <div className="flex flex-col h-full">
+                    <div className="text-center pt-10 flex flex-col items-center">
+                        <div className="flex items-center gap-2 text-slate-500 text-[10px] font-bold tracking-widest uppercase">
+                            {isSyncing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} className="text-emerald-500" />}
+                            СЕГОДНЯ ПОТРАЧЕНО
+                        </div>
+                        <h2 className="text-6xl font-black text-white tracking-tighter mt-2">
+                            {getTodayTotal.toLocaleString()} <span className="text-2xl text-slate-600 font-medium">с</span>
+                        </h2>
+                    </div>
+
+                    <div className="flex-1 flex flex-col justify-center items-center space-y-10 my-10 relative">
+                        {showSuccess && (
+                            <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm rounded-3xl">
+                                <div className="bg-emerald-500 rounded-full p-6 shadow-2xl shadow-emerald-500/50">
+                                    <Check size={40} className="text-white" strokeWidth={3} />
+                                </div>
+                            </div>
+                        )}
+                        <div className="text-center">
+                            <span className="text-7xl font-black text-white tracking-tighter tabular-nums">{amount.toLocaleString()}</span>
+                            <span className="ml-2 text-2xl text-slate-600 font-bold">с</span>
+                        </div>
+                        
+                        <div className="w-full px-4">
+                            <input 
+                                type="range" min="0" max={maxLimit} value={amount} 
+                                onChange={e => setAmount(Number(e.target.value))} 
+                                className="slider-input w-full appearance-none bg-slate-800 h-3 rounded-full outline-none"
+                            />
+                            <div className="flex justify-between text-[10px] text-slate-600 mt-4 font-black uppercase tracking-widest px-1">
+                                <span>0</span>
+                                <span>{maxLimit.toLocaleString()}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-3 mb-24">
+                        {categories.map(cat => (
+                            <button 
+                                key={cat.id} 
+                                onClick={() => handleAdd(cat.id)}
+                                disabled={amount === 0}
+                                className={`h-24 rounded-[2rem] flex flex-col items-center justify-center transition-all active:scale-95 ${amount === 0 ? 'opacity-20 grayscale' : 'bg-slate-800 border border-white/5 shadow-xl'}`}
+                            >
+                                <div className={`w-3 h-3 rounded-full mb-3 shadow-lg ${cat.color}`}></div>
+                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">{cat.name}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="max-w-md mx-auto h-[100dvh] flex flex-col relative overflow-hidden bg-slate-950">
+                    <div className="absolute top-[-10%] left-[-10%] w-64 h-64 bg-blue-600/10 rounded-full blur-[100px] pointer-events-none"></div>
+                    <div className="absolute bottom-[-10%] right-[-10%] w-64 h-64 bg-indigo-600/10 rounded-full blur-[100px] pointer-events-none"></div>
+
+                    <div className="flex-1 px-6 z-10 overflow-y-auto custom-scrollbar">
+                        {view === 'home' && <HomeScreen />}
+                        {view === 'history' && (
+                            <div className="pt-10">
+                                <h2 className="text-3xl font-black text-white mb-6">История</h2>
+                                <div className="space-y-3 pb-32">
+                                    {expenses.length === 0 ? (
+                                        <div className="text-center text-slate-600 py-20 italic">Трат еще нет</div>
+                                    ) : (
+                                        expenses.map(e => {
+                                            const c = categories.find(cat => cat.id === e.categoryId) || categories[5];
+                                            return (
+                                                <div key={e.id} className="bg-slate-800/50 p-5 rounded-3xl flex justify-between items-center border border-white/5">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className={`w-3 h-3 rounded-full ${c.color}`}></div>
+                                                        <div>
+                                                            <div className="text-white font-bold text-sm">{c.name}</div>
+                                                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-tight">
+                                                                {new Date(e.date).toLocaleDateString()}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="text-white font-black">{e.amount.toLocaleString()} с</div>
+                                                        <button onClick={() => deleteExpense(e.id)} className="text-slate-600 hover:text-red-500 transition-colors"><Trash2 size={16}/></button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        {view === 'settings' && (
+                            <div className="pt-10">
+                                <h2 className="text-3xl font-black text-white mb-8">Настройки</h2>
+                                <div className="bg-slate-800/50 p-6 rounded-[2.5rem] border border-white/5 flex items-center justify-between">
+                                    <div className="flex flex-col">
+                                        <span className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Макс. Лимит</span>
+                                        <input type="number" value={maxLimit} onChange={(e) => updateMaxLimit(e.target.value)} className="bg-transparent text-3xl font-black text-white outline-none w-32" />
+                                    </div>
+                                    <span className="text-slate-600 font-bold">СОМ</span>
+                                </div>
+                                <div className="mt-8 p-4 text-[10px] text-slate-600 font-bold uppercase tracking-wider text-center">
+                                    ID пользователя: {user?.uid || 'неизвестно'}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="absolute bottom-0 inset-x-0 p-6 z-50 bg-gradient-to-t from-slate-950 via-slate-950 to-transparent">
+                        <div className="bg-slate-900/80 backdrop-blur-2xl rounded-[2.5rem] p-2 flex justify-between border border-white/5 shadow-2xl">
+                            <button onClick={() => setView('history')} className={`flex-1 py-4 flex flex-col items-center rounded-3xl transition-colors ${view === 'history' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}>
+                                <History size={24} />
+                            </button>
+                            <button onClick={() => setView('home')} className="flex-1 flex justify-center">
+                                <div className={`bg-blue-600 text-white p-4 rounded-[1.8rem] -mt-10 border-8 border-slate-950 shadow-xl active:scale-90 transition-all ${view === 'home' ? 'scale-110' : 'grayscale opacity-50'}`}>
+                                    <Plus size={28} strokeWidth={3} />
+                                </div>
+                            </button>
+                            <button onClick={() => setView('settings')} className={`flex-1 py-4 flex flex-col items-center rounded-3xl transition-colors ${view === 'settings' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}>
+                                <Settings size={24} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
