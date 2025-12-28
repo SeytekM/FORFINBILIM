@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>EasyFin - Личный бюджет</title>
+    <title>EasyFin - Личный бюджет с ИИ</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -70,8 +70,7 @@
             border-color: #3b82f6;
         }
 
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 0px; } 
         
         .streak-fire {
             filter: drop-shadow(0 0 8px rgba(249, 115, 22, 0.6));
@@ -97,6 +96,30 @@
             0% { transform: rotateY(0deg); }
             100% { transform: rotateY(360deg); }
         }
+
+        .gemini-gradient {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #db2777 100%);
+        }
+
+        @keyframes shine {
+            from { transform: translateX(-100%) rotate(45deg); }
+            to { transform: translateX(200%) rotate(45deg); }
+        }
+        .animate-shine {
+            position: relative;
+            overflow: hidden;
+        }
+        .animate-shine::after {
+            content: "";
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(to right, transparent, rgba(255,255,255,0.3), transparent);
+            transform: rotate(45deg);
+            animation: shine 3s infinite;
+        }
     </style>
 </head>
 <body>
@@ -106,7 +129,7 @@
         import { 
             Settings, History, Trash2, Check, 
             Plus, Loader2, Cloud, Flame, ChevronLeft, ChevronRight,
-            Wallet, ArrowUpRight, X, Coins, Trophy, ShoppingBag, Crown
+            Wallet, ArrowUpRight, X, Coins, Trophy, ShoppingBag, Crown, Sparkles, BrainCircuit, MessageSquare
         } from 'https://esm.sh/lucide-react@0.263.1';
 
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
@@ -127,8 +150,38 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const appId = typeof __app_id !== 'undefined' ? __app_id : "easyfin-app";
+        const apiKey = ""; 
 
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // Промпт для очистки вывода
+        const SYSTEM_PROMPT = "Ты финансовый помощник. ОТВЕЧАЙ ТОЛЬКО ТЕКСТОМ. ЗАПРЕЩЕНО использовать Markdown, символы #, *, _, -, > или списки. Пиши простыми короткими предложениями на русском языке. Будь кратким.";
+
+        async function callGemini(prompt) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] }
+            };
+
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error('Ошибка сети');
+                    const result = await response.json();
+                    let text = result.candidates?.[0]?.content?.parts?.[0]?.text || "Извините, я не смог обработать запрос.";
+                    // Дополнительная очистка на стороне клиента на случай, если модель проигнорирует инструкцию
+                    return text.replace(/[#*_~>-]/g, '').trim();
+                } catch (error) {
+                    if (i === 4) return "Ошибка подключения к ИИ. Попробуйте позже.";
+                    await new Promise(res => setTimeout(res, Math.pow(2, i) * 1000));
+                }
+            }
+        }
 
         function App() {
             const [view, setView] = useState('home');
@@ -146,6 +199,10 @@
             const [topUpAmount, setTopUpAmount] = useState('');
             const [selectedDate, setSelectedDate] = useState(new Date());
             
+            const [aiAdvice, setAiAdvice] = useState(null);
+            const [isAiLoading, setIsAiLoading] = useState(false);
+            const [historyAnalysis, setHistoryAnalysis] = useState(null);
+
             const categories = [
                 { id: 1, name: 'Еда', color: 'bg-emerald-500' },
                 { id: 2, name: 'Транспорт', color: 'bg-blue-500' },
@@ -225,55 +282,36 @@
                 return currentStreak;
             }, [expenses]);
 
-            // Авто-присвоение титула за 7 дней
-            useEffect(() => {
-                if (streak >= 7 && activeTitle !== 'Финансовый Мастер') {
-                    const settingsRef = doc(db, 'artifacts', appId, 'users', user?.uid, 'settings', 'config');
-                    updateDoc(settingsRef, { activeTitle: 'Финансовый Мастер' });
-                }
-            }, [streak, user]);
+            const getFinancialAdvice = async () => {
+                setIsAiLoading(true);
+                const todayExpenses = expenses.filter(e => new Date(e.date).toDateString() === new Date().toDateString());
+                const totalToday = todayExpenses.reduce((s, e) => s + e.amount, 0);
+                const prompt = `Дай совет. Баланс: ${balance}, Лимит: ${maxLimit}, Траты сегодня: ${totalToday}. Серия дней: ${streak}.`;
+                const advice = await callGemini(prompt);
+                setAiAdvice(advice);
+                setIsAiLoading(false);
+            };
+
+            const analyzeHistory = async () => {
+                setIsAiLoading(true);
+                const targetExpenses = expenses.filter(e => new Date(e.date).toDateString() === selectedDate.toDateString());
+                const total = targetExpenses.reduce((s, e) => s + e.amount, 0);
+                const prompt = `Проанализируй траты за ${selectedDate.toDateString()} на сумму ${total}.`;
+                const analysis = await callGemini(prompt);
+                setHistoryAnalysis(analysis);
+                setIsAiLoading(false);
+            };
 
             const handleAddExpense = async (catId) => {
                 if (!user || amount === 0) return;
                 try {
                     const expensesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'expenses');
                     const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
-                    
-                    // Проверка: это первая трата за сегодня? Если да, и вчера не было превышения лимита - даем коины.
-                    // Для простоты: проверяем общую сумму за ВЧЕРА при совершении ПЕРВОЙ покупки сегодня.
-                    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
-                    const dailyTotalToday = expenses.filter(e => new Date(e.date).toDateString() === new Date().toDateString()).reduce((s, e) => s + e.amount, 0);
-                    
-                    let coinBonus = 0;
-                    if (dailyTotalToday === 0) { // Первая покупка за сегодня
-                         const yesterdayTotal = expenses.filter(e => new Date(e.date).toDateString() === yesterday.toDateString()).reduce((s, e) => s + e.amount, 0);
-                         // Если вчера потрачено меньше половины лимита
-                         if (yesterdayTotal > 0 && yesterdayTotal < maxLimit / 2) {
-                            coinBonus = 50;
-                         }
-                    }
-
                     await addDoc(expensesRef, { amount, categoryId: catId, date: new Date().toISOString() });
-                    await updateDoc(settingsRef, { 
-                        balance: increment(-amount),
-                        coins: increment(coinBonus)
-                    });
-
+                    await updateDoc(settingsRef, { balance: increment(-amount), coins: increment(10) });
                     setAmount(0);
                     setShowSuccess(true);
                     setTimeout(() => setShowSuccess(false), 1500);
-                } catch (e) { console.error(e); }
-            };
-
-            const buyTitle = async (item) => {
-                if (coins < item.price || purchasedTitles.includes(item.id)) return;
-                try {
-                    const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
-                    await updateDoc(settingsRef, {
-                        coins: increment(-item.price),
-                        purchasedTitles: [...purchasedTitles, item.id],
-                        activeTitle: item.name
-                    });
                 } catch (e) { console.error(e); }
             };
 
@@ -318,9 +356,8 @@
             };
 
             const HomeScreen = () => (
-                <div className="flex flex-col h-full">
-                    {/* Header: Coins & Rank */}
-                    <div className="flex justify-between items-center mt-6 mb-4">
+                <div className="flex flex-col pt-4 pb-40"> 
+                    <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center gap-2 bg-yellow-500/10 px-4 py-2 rounded-full border border-yellow-500/20">
                             <Coins size={16} className="text-yellow-500 coin-spin" />
                             <span className="text-yellow-500 font-black text-sm">{coins}</span>
@@ -344,25 +381,34 @@
                         <ArrowUpRight size={20} className="text-slate-600" />
                     </div>
 
-                    <div className="flex justify-between items-start">
+                    <div className="mb-6">
+                        {!aiAdvice ? (
+                            <button onClick={getFinancialAdvice} disabled={isAiLoading} className="w-full gemini-gradient animate-shine p-4 rounded-[2rem] flex items-center justify-center gap-3 text-white font-black text-xs uppercase tracking-widest disabled:opacity-50">
+                                {isAiLoading ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />} ✨ Совет от ИИ
+                            </button>
+                        ) : (
+                            <div className="bg-slate-800/40 border border-indigo-500/30 p-4 rounded-3xl relative">
+                                <button onClick={() => setAiAdvice(null)} className="absolute top-3 right-3 text-slate-500"><X size={14}/></button>
+                                <div className="flex gap-3">
+                                    <div className="w-8 h-8 rounded-full gemini-gradient flex items-center justify-center flex-shrink-0"><BrainCircuit size={16} className="text-white" /></div>
+                                    <p className="text-[13px] text-indigo-100 leading-snug font-medium pr-4">{aiAdvice}</p>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex justify-between items-start mb-8">
                         <div className="flex flex-col">
-                            <div className="flex items-center gap-2 text-slate-500 text-[10px] font-bold tracking-widest uppercase">
-                                {isSyncing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} className="text-emerald-500" />}
-                                РАСХОД СЕГОДНЯ
-                            </div>
-                            <h2 className="text-4xl font-black text-white tracking-tighter mt-1">
-                                {expenses.filter(e => new Date(e.date).toDateString() === new Date().toDateString()).reduce((s, e) => s + e.amount, 0).toLocaleString()} <span className="text-lg text-slate-600 font-medium">с</span>
-                            </h2>
+                            <div className="flex items-center gap-2 text-slate-500 text-[10px] font-bold tracking-widest uppercase">{isSyncing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} className="text-emerald-500" />} РАСХОД СЕГОДНЯ</div>
+                            <h2 className="text-4xl font-black text-white tracking-tighter mt-1">{expenses.filter(e => new Date(e.date).toDateString() === new Date().toDateString()).reduce((s, e) => s + e.amount, 0).toLocaleString()} <span className="text-lg text-slate-600 font-medium">с</span></h2>
                         </div>
-                        <div className="flex flex-col items-end">
-                            <div className={`bg-orange-500/10 border border-orange-500/20 px-4 py-2 rounded-2xl flex items-center gap-2 ${streak >= 7 ? 'ring-2 ring-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.3)]' : 'streak-fire'}`}>
-                                {streak >= 7 ? <Crown size={20} className="text-yellow-500" /> : <Flame size={20} className="text-orange-500" fill="currentColor" />}
-                                <span className={`${streak >= 7 ? 'text-yellow-500' : 'text-orange-500'} font-black text-xl`}>{streak}</span>
-                            </div>
+                        <div className={`bg-orange-500/10 border border-orange-500/20 px-4 py-2 rounded-2xl flex items-center gap-2 streak-fire`}>
+                            <Flame size={20} className="text-orange-500" fill="currentColor" />
+                            <span className="text-orange-500 font-black text-xl">{streak}</span>
                         </div>
                     </div>
 
-                    <div className="flex-1 flex flex-col justify-center items-center space-y-12 my-2 relative">
+                    <div className="flex flex-col justify-center items-center space-y-8 mb-10 relative">
                         {showSuccess && (
                             <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm rounded-3xl success-overlay">
                                 <div className="bg-emerald-500 rounded-full p-6 shadow-2xl shadow-emerald-500/50"><Check size={40} className="text-white" strokeWidth={3} /></div>
@@ -375,72 +421,46 @@
                         <div className="w-full px-4"><NativeFeelingSlider value={amount} max={maxLimit} onFinalChange={setAmount} /></div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3 mb-28">
+                    <div className="grid grid-cols-3 gap-3">
                         {categories.map(cat => (
-                            <button key={cat.id} onClick={() => handleAddExpense(cat.id)} disabled={amount === 0} className={`h-24 rounded-[2rem] flex flex-col items-center justify-center transition-all active:scale-95 ${amount === 0 ? 'opacity-20 grayscale' : 'bg-slate-800 border border-white/5 shadow-xl'}`}>
-                                <div className={`w-3 h-3 rounded-full mb-3 shadow-lg ${cat.color}`}></div>
+                            <button key={cat.id} onClick={() => handleAddExpense(cat.id)} disabled={amount === 0} className={`h-20 rounded-[1.8rem] flex flex-col items-center justify-center transition-all active:scale-95 ${amount === 0 ? 'opacity-20 grayscale' : 'bg-slate-800 border border-white/5 shadow-xl'}`}>
+                                <div className={`w-2 h-2 rounded-full mb-2 ${cat.color}`}></div>
                                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">{cat.name}</span>
                             </button>
                         ))}
                     </div>
-
-                    {showWalletModal && (
-                        <div className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-xl flex items-end p-6">
-                            <div className="w-full bg-slate-900 rounded-[3rem] border border-white/5 p-8 pb-12 shadow-2xl">
-                                <div className="flex justify-between items-center mb-8">
-                                    <h3 className="text-2xl font-black text-white">Кошелек</h3>
-                                    <button onClick={() => setShowWalletModal(false)} className="text-slate-500"><X size={24}/></button>
-                                </div>
-                                <div className="space-y-6">
-                                    <div className="text-center">
-                                        <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-2">Текущий остаток</div>
-                                        <div className="text-5xl font-black text-white">{balance.toLocaleString()} <span className="text-xl text-slate-600">с</span></div>
-                                    </div>
-                                    <div className="bg-slate-800 p-6 rounded-3xl border border-white/5">
-                                        <div className="flex items-center gap-4">
-                                            <input autoFocus type="number" value={topUpAmount} onChange={(e) => setTopUpAmount(e.target.value)} placeholder="0" className="bg-transparent text-4xl font-black text-white outline-none w-full" />
-                                            <button onClick={handleTopUp} className="bg-blue-600 text-white p-4 rounded-2xl active:scale-90 transition-transform"><Check size={24} strokeWidth={3} /></button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    )}
                 </div>
             );
 
             return (
-                <div className="max-w-md mx-auto h-[100dvh] flex flex-col relative overflow-hidden bg-slate-950 px-6">
-                    <div className="absolute top-[-10%] left-[-10%] w-64 h-64 bg-blue-600/10 rounded-full blur-[100px] pointer-events-none"></div>
-                    <div className="absolute bottom-[-10%] right-[-10%] w-64 h-64 bg-orange-600/10 rounded-full blur-[100px] pointer-events-none"></div>
-
-                    <div className="flex-1 z-10 overflow-y-auto custom-scrollbar">
+                <div className="max-w-md mx-auto h-[100dvh] flex flex-col relative overflow-hidden bg-slate-950">
+                    <div className="flex-1 z-10 overflow-y-auto custom-scrollbar px-6">
                         {view === 'home' && <HomeScreen />}
                         {view === 'history' && (
-                            <div className="pt-10 flex flex-col h-full">
-                                <h2 className="text-3xl font-black text-white mb-6">История</h2>
-                                <div className="bg-slate-800/80 backdrop-blur-md p-2 rounded-3xl flex items-center justify-between mb-6 border border-white/5">
-                                    <button onClick={() => setSelectedDate(d => new Date(d.setDate(d.getDate() - 1)))} className="p-3 text-slate-400 active:text-white transition-colors"><ChevronLeft size={24} /></button>
-                                    <div className="flex flex-col items-center"><span className="text-white font-bold text-sm">{selectedDate.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</span></div>
-                                    <button onClick={() => setSelectedDate(d => new Date(d.setDate(d.getDate() + 1)))} className="p-3 text-slate-400 active:text-white transition-colors"><ChevronRight size={24} /></button>
+                            <div className="pt-10 flex flex-col h-full pb-40">
+                                <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-3xl font-black text-white">История</h2>
+                                    <button onClick={analyzeHistory} disabled={isAiLoading} className="bg-indigo-600/20 text-indigo-400 p-3 rounded-2xl hover:bg-indigo-600/30 border border-indigo-500/20">{isAiLoading ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}</button>
                                 </div>
-                                <div className="space-y-3 pb-32">
+                                {historyAnalysis && (
+                                    <div className="mb-6 bg-indigo-900/20 border border-indigo-500/20 p-5 rounded-[2rem] relative">
+                                        <button onClick={() => setHistoryAnalysis(null)} className="absolute top-3 right-4 text-indigo-400"><X size={14}/></button>
+                                        <div className="flex items-center gap-2 mb-2"><MessageSquare size={14} className="text-indigo-400" /><span className="text-[10px] font-black uppercase text-indigo-400 tracking-widest">✨ Инсайт Gemini</span></div>
+                                        <p className="text-[12px] text-indigo-100 leading-snug">{historyAnalysis}</p>
+                                    </div>
+                                )}
+                                <div className="bg-slate-800/80 backdrop-blur-md p-2 rounded-3xl flex items-center justify-between mb-6 border border-white/5">
+                                    <button onClick={() => setSelectedDate(d => { const n = new Date(d); n.setDate(n.getDate() - 1); return n; })} className="p-3 text-slate-400"><ChevronLeft size={24} /></button>
+                                    <span className="text-white font-bold text-sm">{selectedDate.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</span>
+                                    <button onClick={() => setSelectedDate(d => { const n = new Date(d); n.setDate(n.getDate() + 1); return n; })} className="p-3 text-slate-400"><ChevronRight size={24} /></button>
+                                </div>
+                                <div className="space-y-3">
                                     {expenses.filter(e => new Date(e.date).toDateString() === selectedDate.toDateString()).sort((a,b) => new Date(b.date) - new Date(a.date)).map(e => {
                                         const c = categories.find(cat => cat.id === e.categoryId) || categories[5];
                                         return (
                                             <div key={e.id} className="bg-slate-800/50 p-5 rounded-3xl flex justify-between items-center border border-white/5">
-                                                <div className="flex items-center gap-4">
-                                                    <div className={`w-3 h-3 rounded-full ${c.color}`}></div>
-                                                    <div className="text-white font-bold text-sm">{c.name}</div>
-                                                </div>
-                                                <div className="flex items-center gap-4">
-                                                    <div className="text-white font-black">{e.amount.toLocaleString()} с</div>
-                                                    <button onClick={async () => {
-                                                        const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
-                                                        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'expenses', e.id));
-                                                        await updateDoc(settingsRef, { balance: increment(e.amount) });
-                                                    }} className="text-slate-600 hover:text-red-500"><Trash2 size={16}/></button>
-                                                </div>
+                                                <div className="flex items-center gap-4"><div className={`w-3 h-3 rounded-full ${c.color}`}></div><div className="text-white font-bold text-sm">{c.name}</div></div>
+                                                <div className="flex items-center gap-4"><div className="text-white font-black">{e.amount.toLocaleString()} с</div><button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'expenses', e.id))} className="text-slate-600"><Trash2 size={16}/></button></div>
                                             </div>
                                         );
                                     })}
@@ -448,40 +468,18 @@
                             </div>
                         )}
                         {view === 'settings' && (
-                            <div className="pt-10">
+                            <div className="pt-10 pb-40 px-2">
                                 <h2 className="text-3xl font-black text-white mb-8">Опции</h2>
-                                <div className="space-y-8 pb-32">
+                                <div className="space-y-8">
                                     <section>
-                                        <div className="flex items-center gap-2 mb-4 text-slate-500 uppercase text-[10px] font-black tracking-widest"><ShoppingBag size={14} /> Магазин титулов</div>
+                                        <div className="flex items-center gap-2 mb-4 text-slate-500 uppercase text-[10px] font-black tracking-widest"><ShoppingBag size={14} /> Магазин</div>
                                         <div className="space-y-3">
                                             {shopItems.map(item => (
                                                 <div key={item.id} className="bg-slate-800/50 p-4 rounded-3xl border border-white/5 flex items-center justify-between">
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-2xl">{item.icon}</span>
-                                                        <span className="text-white font-bold text-sm">{item.name}</span>
-                                                    </div>
-                                                    <button 
-                                                        onClick={() => buyTitle(item)}
-                                                        disabled={coins < item.price || purchasedTitles.includes(item.id)}
-                                                        className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase ${purchasedTitles.includes(item.id) ? 'bg-emerald-500/10 text-emerald-500' : 'bg-blue-600 text-white active:scale-95 disabled:opacity-30'}`}
-                                                    >
-                                                        {purchasedTitles.includes(item.id) ? 'Куплено' : `${item.price} 🪙`}
-                                                    </button>
+                                                    <div className="flex items-center gap-3"><span className="text-2xl">{item.icon}</span><span className="text-white font-bold text-sm">{item.name}</span></div>
+                                                    <button className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase disabled:opacity-30">{item.price} 🪙</button>
                                                 </div>
                                             ))}
-                                        </div>
-                                    </section>
-                                    <section>
-                                        <div className="flex items-center gap-2 mb-4 text-slate-500 uppercase text-[10px] font-black tracking-widest"><Settings size={14} /> Конфигурация</div>
-                                        <div className="bg-slate-800/50 p-6 rounded-[2.5rem] border border-white/5 space-y-4">
-                                            <div>
-                                                <span className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Лимит шкалы</span>
-                                                <input type="number" value={maxLimit} onChange={(e) => { const v = Math.max(100, Number(e.target.value)); setMaxLimit(v); updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config'), { maxLimit: v }); }} className="bg-transparent text-2xl font-black text-white outline-none w-full" />
-                                            </div>
-                                            <div className="pt-4 border-t border-white/5">
-                                                <span className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Ручная правка баланса</span>
-                                                <input type="number" value={balance} onChange={(e) => { const v = Number(e.target.value); setBalance(v); updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config'), { balance: v }); }} className="bg-transparent text-2xl font-black text-white outline-none w-full" />
-                                            </div>
                                         </div>
                                     </section>
                                 </div>
@@ -489,13 +487,28 @@
                         )}
                     </div>
 
-                    <div className="absolute bottom-0 inset-x-0 p-6 z-[60] bg-gradient-to-t from-slate-950 via-slate-950 to-transparent">
+                    <div className="fixed bottom-0 inset-x-0 p-6 z-[60] bg-gradient-to-t from-slate-950 via-slate-950 to-transparent">
                         <div className="bg-slate-900/80 backdrop-blur-2xl rounded-[2.5rem] p-2 flex justify-between border border-white/5 shadow-2xl">
                             <button onClick={() => setView('history')} className={`flex-1 py-4 flex flex-col items-center rounded-3xl ${view === 'history' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}><History size={24} /></button>
                             <button onClick={() => setView('home')} className="flex-1 flex justify-center"><div className={`bg-blue-600 text-white p-4 rounded-[1.8rem] -mt-10 border-8 border-slate-950 active:scale-90 transition-all ${view === 'home' ? 'scale-110 shadow-2xl shadow-blue-500/30' : 'grayscale opacity-50'}`}><Plus size={28} strokeWidth={3} /></div></button>
                             <button onClick={() => setView('settings')} className={`flex-1 py-4 flex flex-col items-center rounded-3xl ${view === 'settings' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}><Settings size={24} /></button>
                         </div>
                     </div>
+
+                    {showWalletModal && (
+                        <div className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-xl flex items-end p-6">
+                            <div className="w-full bg-slate-900 rounded-[3rem] p-8 pb-12 shadow-2xl border border-white/5">
+                                <div className="flex justify-between items-center mb-8"><h3 className="text-2xl font-black text-white">Кошелек</h3><button onClick={() => setShowWalletModal(false)} className="text-slate-500"><X size={24}/></button></div>
+                                <div className="space-y-6">
+                                    <div className="text-center"><div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-2">Текущий остаток</div><div className="text-5xl font-black text-white">{balance.toLocaleString()} <span className="text-xl text-slate-600">с</span></div></div>
+                                    <div className="bg-slate-800 p-6 rounded-3xl border border-white/5 flex items-center gap-4">
+                                        <input type="number" value={topUpAmount} onChange={(e) => setTopUpAmount(e.target.value)} placeholder="0" className="bg-transparent text-4xl font-black text-white outline-none w-full" />
+                                        <button onClick={handleTopUp} className="bg-blue-600 text-white p-4 rounded-2xl"><Check size={24} strokeWidth={3} /></button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }
